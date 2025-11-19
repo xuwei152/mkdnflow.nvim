@@ -16,6 +16,8 @@
 --
 -- This module: File and link navigation functions
 
+local vim = vim
+
 -- Get OS for use in a couple of functions
 local this_os = require('mkdnflow').this_os
 -- Generic OS message
@@ -52,6 +54,7 @@ local limit_preview_lines
 local get_longest_display_width
 local close_preview_window
 local preview_state
+local detect_preview_filetype
 
 local tobool = function(str)
     local bool = false
@@ -60,6 +63,14 @@ local tobool = function(str)
         bool = true
     end
     return bool
+end
+
+detect_preview_filetype = function(path)
+    local ok, ft = pcall(vim.filetype.match, { filename = path })
+    if ok and ft and ft ~= '' then
+        return ft
+    end
+    return 'markdown'
 end
 
 local vim_hover_preview = function(path, anchor)
@@ -102,19 +113,22 @@ local vim_hover_preview = function(path, anchor)
     local anchor_line = locate_anchor_line(lines, anchor)
     lines, anchor_line = limit_preview_lines(lines, anchor_line)
     local display_path = vim.fn.fnamemodify(vim.fn.expand(path_w_ext), ':.')
-    local header = string.format('**%s**', display_path)
+    local header = string.format('📄:%s', display_path)
     if anchor and anchor ~= '' then
         header = header .. ' ' .. anchor
     end
     table.insert(lines, 1, header)
+    local separator = string.rep('─', math.max(10, vim.fn.strdisplaywidth(header)))
+    table.insert(lines, 2, separator)
     local adjusted_anchor = anchor_line and (anchor_line + 1) or nil
+    local preview_ft = detect_preview_filetype(path_w_ext)
     local width = math.min(
         math.max(40, get_longest_display_width(lines) + 2),
         math.max(40, math.floor(vim.o.columns * 0.8))
     )
     local height = math.min(#lines, math.max(10, math.floor(vim.o.lines * 0.6)))
     close_preview_window()
-    local bufnr, winid = lsp_util.open_floating_preview(lines, 'markdown', {
+    local bufnr, winid = lsp_util.open_floating_preview(lines, preview_ft or 'markdown', {
         border = 'rounded',
         focusable = true,
         max_width = width,
@@ -122,6 +136,13 @@ local vim_hover_preview = function(path, anchor)
     })
     if not bufnr or not winid then
         return false
+    end
+    if preview_ft then
+        pcall(vim.api.nvim_buf_set_option, bufnr, 'filetype', preview_ft)
+        local ts = vim.treesitter
+        if ts and type(ts.start) == 'function' then
+            pcall(ts.start, bufnr, preview_ft)
+        end
     end
     preview_state.win = winid
     preview_state.buf = bufnr
