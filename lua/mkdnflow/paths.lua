@@ -400,6 +400,39 @@ vim_open = function(path, anchor)
     end
 end
 
+local nb_path_exists = function(path)
+    if this_os:match('Windows') then
+        path = path:gsub('/', '\\')
+    end
+    local derived_path = resolve_notebook_path(path)
+    if (this_os == 'Linux' or this_os == 'Darwin') and string.match(derived_path, '^~/') then
+        derived_path = string.gsub(derived_path, '^~/', '$HOME/')
+    end
+    local path_w_ext
+    if not derived_path:match('%.[%a]+$') then
+        if implicit_extension then
+            path_w_ext = derived_path .. '.' .. implicit_extension
+        else
+            path_w_ext = derived_path .. '.md'
+        end
+    else
+        path_w_ext = derived_path
+    end
+    local exists_dir = exists(derived_path, 'd')
+    local exists_file = exists(derived_path, 'f') or exists(path_w_ext, 'f')
+    if exists_dir or exists_file then
+        return true
+    end
+    if not silent then
+        vim.api.nvim_echo(
+            { { '⬇️  ' .. derived_path .. " doesn't seem to exist!", 'WarningMsg' } },
+            true,
+            {}
+        )
+    end
+    return false
+end
+
 --[[
 enter_internal_path() takes a path and opens a dialog in the command line that
 asks the user to complete the path. Called when the path goes to a directory
@@ -606,6 +639,9 @@ M.handlePath = function(path, anchor)
     local path_type = M.pathType(path, anchor)
     -- Handle according to path type
     if path_type == 'nb_page' then
+        if not nb_path_exists(path) then
+            return
+        end
         if not vim_hover_preview(path, anchor) then
             vim_open(path, anchor)
         end
