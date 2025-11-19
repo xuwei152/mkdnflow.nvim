@@ -41,6 +41,17 @@ local buffers = require('mkdnflow.buffers')
 local bib = require('mkdnflow.bib')
 local cursor = require('mkdnflow.cursor')
 local links = require('mkdnflow.links')
+local lsp_util = vim.lsp.util
+
+local resolve_notebook_path
+local enter_internal_path
+local vim_open
+local exists
+local locate_anchor_line
+local limit_preview_lines
+local get_longest_display_width
+local close_preview_window
+local preview_state
 
 local tobool = function(str)
     local bool = false
@@ -51,11 +62,91 @@ local tobool = function(str)
     return bool
 end
 
+local vim_hover_preview = function(path, anchor)
+    if this_os:match('Windows') then
+        path = path:gsub('/', '\\')
+    end
+    path = resolve_notebook_path(path)
+    if this_os == 'Linux' or this_os == 'Darwin' then
+        if string.match(path, '^~/') then
+            path = string.gsub(path, '^~/', '$HOME/')
+        end
+    end
+    local path_w_ext
+    if not path:match('%.[%a]+$') then
+        if implicit_extension then
+            path_w_ext = path .. '.' .. implicit_extension
+        else
+            path_w_ext = path .. '.md'
+        end
+    else
+        path_w_ext = path
+    end
+    if exists(path, 'd') and not exists(path_w_ext, 'f') then
+        enter_internal_path(path)
+        return true
+    end
+    if not exists(path_w_ext, 'f') then
+        return false
+    end
+    local ok, lines = pcall(vim.fn.readfile, path_w_ext)
+    if not ok then
+        if not silent then
+            vim.api.nvim_echo({ { '⬇️  ' .. lines, 'ErrorMsg' } }, true, {})
+        end
+        return false
+    end
+    if vim.tbl_isempty(lines) then
+        lines = { '_(empty file)_' }
+    end
+    local anchor_line = locate_anchor_line(lines, anchor)
+    lines, anchor_line = limit_preview_lines(lines, anchor_line)
+    local display_path = vim.fn.fnamemodify(vim.fn.expand(path_w_ext), ':.')
+    local header = string.format('**%s**', display_path)
+    if anchor and anchor ~= '' then
+        header = header .. ' ' .. anchor
+    end
+    table.insert(lines, 1, header)
+    local adjusted_anchor = anchor_line and (anchor_line + 1) or nil
+    local width = math.min(
+        math.max(40, get_longest_display_width(lines) + 2),
+        math.max(40, math.floor(vim.o.columns * 0.8))
+    )
+    local height = math.min(#lines, math.max(10, math.floor(vim.o.lines * 0.6)))
+    close_preview_window()
+    local bufnr, winid = lsp_util.open_floating_preview(lines, 'markdown', {
+        border = 'rounded',
+        focusable = true,
+        max_width = width,
+        max_height = height,
+    })
+    if not bufnr or not winid then
+        return false
+    end
+    preview_state.win = winid
+    preview_state.buf = bufnr
+    if adjusted_anchor then
+        vim.api.nvim_win_set_cursor(winid, { math.min(adjusted_anchor, #lines), 0 })
+    end
+    local close_preview = function()
+        close_preview_window()
+    end
+    vim.keymap.set('n', 'q', close_preview, { buffer = bufnr, nowait = true, silent = true })
+    vim.keymap.set('n', '<Esc>', close_preview, { buffer = bufnr, nowait = true, silent = true })
+    vim.keymap.set('n', '<CR>', function()
+        close_preview()
+        vim.schedule(function()
+            vim_open(path, anchor)
+        end)
+    end, { buffer = bufnr, nowait = true, silent = true })
+    return true
+end
+
 --[[
 exists() determines whether the path specified as the argument exists
 NOTE: Assumes that the initially opened file is in an existing directory!
 --]]
-local exists = function(path, unit_type)
+exists = function(path, unit_type)
     -- If type is not specified, use "d" (directory) by default
     unit_type = unit_type or 'd'
     local handle
@@ -90,7 +181,7 @@ local M = {}
 --[[
 resolve_notebook_path() takes a link source and determines what its absolute reference is
 --]]
-local resolve_notebook_path = function(path, sub_home_var)
+resolve_notebook_path = function(path, sub_home_var)
     sub_home_var = sub_home_var or false
     local derived_path = path
     if this_os:match('Windows') then
@@ -125,7 +216,82 @@ local resolve_notebook_path = function(path, sub_home_var)
     return derived_path
 end
 
-local enter_internal_path = function() end
+enter_internal_path = function() end
+
+preview_state = { win = nil, buf = nil }
+
+close_preview_window = function()
+    if preview_state.win and vim.api.nvim_win_is_valid(preview_state.win) then
+        vim.api.nvim_win_close(preview_state.win, true)
+    end
+    preview_state.win = nil
+    preview_state.buf = nil
+end
+
+get_longest_display_width = function(lines)
+    local longest = 0
+    for _, line in ipairs(lines) do
+        local width = vim.fn.strdisplaywidth(line)
+        if width > longest then
+            longest = width
+        end
+    end
+    return longest
+end
+
+locate_anchor_line = function(lines, anchor)
+    if not anchor or anchor == '' then
+        return nil
+    end
+    local target = anchor:gsub('^#', '')
+    if target == '' then
+        return nil
+    end
+    local lower_target = target:lower()
+    for idx, line in ipairs(lines) do
+        local heading = line:match('^%s*#+%s*(.+)$') or line
+        local trimmed = heading:gsub('%s+$', '')
+        local id = line:match('{#(.-)}')
+        if id and id:lower() == lower_target then
+            return idx
+        end
+        if trimmed:lower() == lower_target then
+            return idx
+        end
+    end
+    return nil
+end
+
+local preview_line_limit = 400
+
+limit_preview_lines = function(lines, anchor_line)
+    if #lines <= preview_line_limit then
+        return vim.deepcopy(lines), anchor_line
+    end
+    local half = math.floor(preview_line_limit / 2)
+    local start_idx = 1
+    if anchor_line then
+        start_idx = math.max(anchor_line - half, 1)
+    end
+    local end_idx = math.min(start_idx + preview_line_limit - 1, #lines)
+    if end_idx - start_idx + 1 < preview_line_limit then
+        start_idx = math.max(1, end_idx - preview_line_limit + 1)
+    end
+    local snippet = {}
+    local offset = 0
+    if start_idx > 1 then
+        table.insert(snippet, '…')
+        offset = 1
+    end
+    for i = start_idx, end_idx do
+        table.insert(snippet, lines[i])
+    end
+    if end_idx < #lines then
+        table.insert(snippet, '…')
+    end
+    local adjusted_anchor = anchor_line and (anchor_line - start_idx + 1 + offset) or nil
+    return snippet, adjusted_anchor
+end
 
 --[[
 formatTemplate() takes the user-provided (or default) template and replaces it
@@ -149,7 +315,7 @@ end
 vim_open() takes a path to a notebook-internal file and (optionally) an
 anchor and opens it in nvim.
 --]]
-local vim_open = function(path, anchor)
+vim_open = function(path, anchor)
     if this_os:match('Windows') then
         path = path:gsub('/', '\\')
     end
@@ -197,7 +363,7 @@ local vim_open = function(path, anchor)
                 template = M.formatTemplate('before')
             end
         end
-        vim.cmd(':e ' .. path_w_ext)
+        vim.cmd(':vsplit ' .. path_w_ext)
         M.updateDirs()
         -- Inject the template
         if new_file_config.use_template and template then
@@ -419,7 +585,9 @@ M.handlePath = function(path, anchor)
     local path_type = M.pathType(path, anchor)
     -- Handle according to path type
     if path_type == 'nb_page' then
-        vim_open(path, anchor)
+        if not vim_hover_preview(path, anchor) then
+            vim_open(path, anchor)
+        end
     elseif path_type == 'url' then
         system_open(path .. (anchor or ''), 'url')
     elseif path_type == 'file' then
