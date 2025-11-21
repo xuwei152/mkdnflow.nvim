@@ -90,6 +90,11 @@ local default_config = {
         end,
         create_on_follow_failure = true,
     },
+    paths = {
+        preview = {
+            line_limit = 400,
+        },
+    },
     new_file_template = {
         use_template = false,
         placeholders = {

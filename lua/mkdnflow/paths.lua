@@ -34,6 +34,8 @@ local root_dir = require('mkdnflow').root_dir
 local silent = require('mkdnflow').config.silent
 local links_config = require('mkdnflow').config.links
 local new_file_config = require('mkdnflow').config.new_file_template
+local paths_config = require('mkdnflow').config.paths or {}
+local preview_config = paths_config.preview or {}
 local implicit_extension = links_config.implicit_extension
 local link_transform = links_config.transform_implicit
 
@@ -283,20 +285,25 @@ locate_anchor_line = function(lines, anchor)
     return nil
 end
 
-local preview_line_limit = 400
+local preview_line_limit = preview_config.line_limit
+if type(preview_line_limit) ~= 'number' then
+    preview_line_limit = 400
+end
+local preview_unlimited = preview_line_limit < 0
 
 limit_preview_lines = function(lines, anchor_line)
-    if #lines <= preview_line_limit then
+    if preview_unlimited or #lines <= preview_line_limit then
         return vim.deepcopy(lines), anchor_line
     end
-    local half = math.floor(preview_line_limit / 2)
+    local effective_limit = math.max(preview_line_limit, 1)
+    local half = math.floor(effective_limit / 2)
     local start_idx = 1
     if anchor_line then
         start_idx = math.max(anchor_line - half, 1)
     end
-    local end_idx = math.min(start_idx + preview_line_limit - 1, #lines)
-    if end_idx - start_idx + 1 < preview_line_limit then
-        start_idx = math.max(1, end_idx - preview_line_limit + 1)
+    local end_idx = math.min(start_idx + effective_limit - 1, #lines)
+    if end_idx - start_idx + 1 < effective_limit then
+        start_idx = math.max(1, end_idx - effective_limit + 1)
     end
     local snippet = {}
     local offset = 0
