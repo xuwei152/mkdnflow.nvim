@@ -201,6 +201,55 @@ end
 
 local M = {}
 
+ local clean_external_path = function(path)
+     if not path then
+         return path
+     end
+     path = tostring(path)
+     path = path:gsub('^%s+', ''):gsub('%s+$', '')
+     -- If the path is wrapped in angle brackets (common in Markdown), unwrap it.
+     if path:sub(1, 1) == '<' then
+         -- Handle cases like: <path with spaces> or <path> "optional title"
+         path = path:match('^<([^>]+)>') or path
+         return path:gsub('^%s+', ''):gsub('%s+$', '')
+     end
+     -- Handle cases like: path "optional title" (markdown link title)
+     local no_title = path:match('^(.-)%s+"[^"]*"%s*$')
+     if no_title then
+         path = no_title
+     else
+         no_title = path:match("^(.-)%s+'[^']*'%s*$")
+         if no_title then
+             path = no_title
+         end
+     end
+     return path
+ end
+
+ local is_wsl = function()
+     if vim.fn.has('wsl') == 1 then
+         return true
+     end
+     if vim.loop and vim.loop.os_getenv then
+         if vim.loop.os_getenv('WSL_DISTRO_NAME') or vim.loop.os_getenv('WSL_INTEROP') or vim.loop.os_getenv('WSLENV') then
+             return true
+         end
+     end
+     local ok, lines = pcall(vim.fn.readfile, '/proc/version')
+     if ok and lines and lines[1] and lines[1]:lower():match('microsoft') then
+         return true
+     end
+     return false
+ end
+
+ local is_office_path = function(path)
+     local p = tostring(clean_external_path(path) or '')
+     p = p:gsub('#.*$', '') -- drop anchors
+     p = p:gsub('%?.*$', '') -- drop query params if any
+     p = p:lower()
+     return p:match('%.docx?$') ~= nil or p:match('%.pptx?$') ~= nil
+end
+
 --[[
 resolve_notebook_path() takes a link source and determines what its absolute reference is
 --]]
@@ -466,12 +515,27 @@ Returns nothing
 --]]
 local system_open = function(path, type)
     local shell_open = function(path_)
+        local cleaned_path = clean_external_path(path_)
         if this_os == 'Linux' then
-            vim.api.nvim_command('silent !xdg-open ' .. vim.fn.shellescape(path_, true))
+            if is_wsl() and is_office_path(cleaned_path) then
+                if vim.fn.executable('eopen.sh') == 1 then
+                    vim.api.nvim_command('silent !eopen.sh ' .. vim.fn.shellescape(cleaned_path, true))
+                else
+                    if not silent then
+                        vim.api.nvim_echo(
+                            { { '⬇️  eopen not found; please install eopen to open Office files in WSL', 'WarningMsg' } },
+                            true,
+                            {}
+                        )
+                    end
+                end
+                return
+            end
+            vim.api.nvim_command('silent !xdg-open ' .. vim.fn.shellescape(cleaned_path, true))
         elseif this_os == 'Darwin' then
-            vim.api.nvim_command('silent !open ' .. vim.fn.shellescape(path_, true) .. ' &')
+            vim.api.nvim_command('silent !open ' .. vim.fn.shellescape(cleaned_path, true) .. ' &')
         elseif this_os:match('Windows') then
-            os.execute('cmd.exe /c "start "" "' .. path_ .. '"')
+            os.execute('cmd.exe /c "start "" "' .. cleaned_path .. '"')
         else
             if not silent then
                 vim.api.nvim_echo({ { this_os_err, 'ErrorMsg' } }, true, {})
@@ -498,8 +562,9 @@ end
 handle_external_file() takes a path to a non-notebook file and determines how to open it:
 --]]
 local handle_external_file = function(path)
+    path = clean_external_path(path)
     -- Get what's after the file: tag
-    local real_path = string.match(path, '^file:(.*)')
+    local real_path = string.match(path, '^file:(.*)') or path
     if this_os:match('Windows') then
         real_path = real_path:gsub('/', '\\')
         if real_path:match('^~\\') then
@@ -604,13 +669,17 @@ Returns a string:
 M.pathType = function(path, anchor)
     if not path then
         return nil
-    elseif string.find(path, '^file:') then
+    end
+    local trimmed_path = tostring(path):gsub('^%s+', ''):gsub('%s+$', '')
+    if string.find(trimmed_path, '^file:') then
         return 'file'
-    elseif links.hasUrl(path) then
+    elseif links.hasUrl(trimmed_path) then
         return 'url'
-    elseif string.find(path, '^@') then
+    elseif is_office_path(trimmed_path) then
+        return 'file'
+    elseif string.find(trimmed_path, '^@') then
         return 'citation'
-    elseif path == '' and anchor then
+    elseif trimmed_path == '' and anchor then
         return 'anchor'
     else
         return 'nb_page'
@@ -643,6 +712,11 @@ Returns nothing
 M.handlePath = function(path, anchor)
     anchor = anchor or false
     path = M.transformPath(path)
+    local cleaned_path = clean_external_path(path)
+    if is_office_path(cleaned_path) then
+        handle_external_file(cleaned_path)
+        return
+    end
     local path_type = M.pathType(path, anchor)
     -- Handle according to path type
     if path_type == 'nb_page' then
